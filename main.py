@@ -1,16 +1,7 @@
 # =========================================
-# Multi-Agent System with Conditional Routing (LangGraph)
-# =========================================
-# Agents:
-# 1. Planner Agent
-# 2. Executor Agent
-# 3. Responder Agent
+# Multi-Agent MCP System (Multi-Tool)
 # =========================================
 
-
-# =========================================
-# Imports
-# =========================================
 from openai import OpenAI
 import json
 import os
@@ -27,7 +18,7 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
-    raise ValueError("OPENAI_API_KEY is not set in .env file")
+    raise ValueError("OPENAI_API_KEY is not set")
 
 
 # =========================================
@@ -37,126 +28,114 @@ client = OpenAI(api_key=api_key)
 
 
 # =========================================
-# Tool: Get Weather Data
+# TOOLS (MCP Style)
 # =========================================
-def get_weather(latitude: float, longitude: float) -> dict:
-    """
-    Fetch current weather data using Open-Meteo API.
-    """
+
+def get_weather(latitude: float, longitude: float):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current_weather=true"
+    return requests.get(url).json()
 
-    try:
-        response = requests.get(url)
 
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return {"error": "Failed to fetch weather data"}
+def get_ip_info():
+    url = "http://ip-api.com/json/"
+    return requests.get(url).json()
 
-    except Exception as e:
-        return {"error": str(e)}
+
+def search_duckduckgo(query: str):
+    url = f"https://api.duckduckgo.com/?q={query}&format=json"
+    return requests.get(url).json()
+
+
+# =========================================
+# TOOL REGISTRY (IMPORTANT)
+# =========================================
+TOOLS = {
+    "get_weather": get_weather,
+    "get_ip_info": get_ip_info,
+    "search": search_duckduckgo
+}
 
 
 # =========================================
 # Planner Agent
 # =========================================
-def planner_agent(user_query: str) -> dict:
-    """
-    Planner Agent:
-    - Understands user query
-    - Extracts intent
-    - Breaks into tasks
-    """
+def planner_agent(user_query: str):
 
-    PLANNER_PROMPT = """
+    PROMPT = """
     You are a Planner Agent.
 
-    Your job:
-    1. Understand user query
-    2. Identify intent
-    3. Break into tasks
-
     Return JSON:
-
     {
       "intent": "string",
-      "tasks": ["list of steps"]
+      "tasks": ["steps"]
     }
     """
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": PLANNER_PROMPT},
+            {"role": "system", "content": PROMPT},
             {"role": "user", "content": user_query}
         ],
-        temperature=0,
         response_format={"type": "json_object"}
     )
 
     output = response.choices[0].message.content
-
-    print("\n🧠 Planner Output:")
-    print(output)
+    print("\n🧠 Planner:", output)
 
     return json.loads(output)
 
 
 # =========================================
-# Executor Agent
+# Executor Agent (Tool Selector)
 # =========================================
-def executor_agent(planner_output: dict) -> dict:
-    """
-    Executor Agent:
-    - Decides tool usage
-    - Executes tool if needed
-    """
+def executor_agent(planner_output: dict, user_query: str):
 
-    EXECUTOR_PROMPT = f"""
-    You are an Executor Agent.
+    PROMPT = f"""
+    You are a Tool Selection Agent.
 
-    Based on this plan:
-    {planner_output}
+    Available Tools:
+    1. get_weather(latitude, longitude)
+    2. get_ip_info()
+    3. search(query)
 
     Decide:
-    - Whether a tool is needed
-    - Which tool to call
-
-    Available tool:
-    get_weather(latitude, longitude)
+    - which tool to use
+    - parameters
 
     Return JSON:
-
     {{
       "use_tool": true/false,
-      "tool_name": "string or null",
+      "tool_name": "string",
       "tool_params": {{}}
     }}
+
+    Query: {user_query}
+    Plan: {planner_output}
     """
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": EXECUTOR_PROMPT}
-        ],
-        temperature=0,
+        messages=[{"role": "system", "content": PROMPT}],
         response_format={"type": "json_object"}
     )
 
     output = response.choices[0].message.content
-
-    print("\n⚙️ Executor Output:")
-    print(output)
+    print("\n⚙️ Executor:", output)
 
     result = json.loads(output)
 
-    # ====================================
-    # Tool Execution Logic
-    # ====================================
-    if result.get("use_tool") and result.get("tool_name") == "get_weather":
+    # Execute tool dynamically
+    if result.get("use_tool"):
+        tool_name = result.get("tool_name")
         params = result.get("tool_params", {})
-        tool_result = get_weather(**params)
-        result["tool_result"] = tool_result
+
+        if tool_name in TOOLS:
+            try:
+                tool_result = TOOLS[tool_name](**params)
+                result["tool_result"] = tool_result
+            except Exception as e:
+                result["tool_result"] = {"error": str(e)}
 
     return result
 
@@ -164,25 +143,19 @@ def executor_agent(planner_output: dict) -> dict:
 # =========================================
 # Responder Agent
 # =========================================
-def responder_agent(planner_output: dict, executor_output: dict) -> dict:
-    """
-    Responder Agent:
-    - Generates final answer
-    """
+def responder_agent(planner, executor):
 
-    RESPONDER_PROMPT = f"""
+    PROMPT = f"""
     You are a Responder Agent.
 
-    Planner Output:
-    {planner_output}
+    Planner:
+    {planner}
 
-    Executor Output:
-    {executor_output}
+    Executor:
+    {executor}
 
-    Generate a clear and helpful final answer.
-
+    Give final answer.
     Return JSON:
-
     {{
       "final_answer": "string"
     }}
@@ -190,83 +163,46 @@ def responder_agent(planner_output: dict, executor_output: dict) -> dict:
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": RESPONDER_PROMPT}
-        ],
-        temperature=0,
+        messages=[{"role": "system", "content": PROMPT}],
         response_format={"type": "json_object"}
     )
 
     output = response.choices[0].message.content
-
-    print("\n💬 Responder Output:")
-    print(output)
+    print("\n💬 Responder:", output)
 
     return json.loads(output)
 
 
 # =========================================
-# LangGraph State Definition (Updated)
+# LangGraph State
 # =========================================
 class AgentState(TypedDict):
     user_query: str
-    planner_output: dict
-    executor_output: dict
-    final_output: dict
-    use_tool: bool
+    planner: dict
+    executor: dict
+    final: dict
 
 
 # =========================================
-# Planner Node
+# Nodes
 # =========================================
-def planner_node(state: AgentState) -> AgentState:
-    state["planner_output"] = planner_agent(state["user_query"])
+def planner_node(state: AgentState):
+    state["planner"] = planner_agent(state["user_query"])
+    return state
+
+
+def executor_node(state: AgentState):
+    state["executor"] = executor_agent(state["planner"], state["user_query"])
+    return state
+
+
+def responder_node(state: AgentState):
+    state["final"] = responder_agent(state["planner"], state["executor"])
     return state
 
 
 # =========================================
-# Executor Node (Sets use_tool flag)
-# =========================================
-def executor_node(state: AgentState) -> AgentState:
-    executor_output = executor_agent(state["planner_output"])
-
-    state["executor_output"] = executor_output
-    state["use_tool"] = executor_output.get("use_tool", False)
-
-    return state
-
-
-# =========================================
-# Responder Node
-# =========================================
-def responder_node(state: AgentState) -> AgentState:
-    state["final_output"] = responder_agent(
-        state.get("planner_output", {}),
-        state.get("executor_output", {})
-    )
-    return state
-
-
-# =========================================
-# Routing Logic (Conditional Decision)
-# =========================================
-def route_decision(state: AgentState) -> str:
-    """
-    Decide next node based on tool usage
-    """
-    # ⚠️ Note: Executor hasn't run yet, so we simulate decision
-    # For now, we trigger executor always for safety if unclear
-
-    query = state["user_query"].lower()
-
-    if "weather" in query:
-        return "executor"
-    else:
-        return "responder"
-
-
-# =========================================
-# Build LangGraph with Conditional Routing
+# Graph
 # =========================================
 graph = StateGraph(AgentState)
 
@@ -276,46 +212,32 @@ graph.add_node("responder", responder_node)
 
 graph.set_entry_point("planner")
 
-# 🔥 Conditional Routing
-graph.add_conditional_edges(
-    "planner",
-    route_decision,
-    {
-        "executor": "executor",
-        "responder": "responder"
-    }
-)
-
-# After executor → responder
+graph.add_edge("planner", "executor")
 graph.add_edge("executor", "responder")
 
 app = graph.compile()
 
 
 # =========================================
-# Run LangGraph Workflow
+# Run
 # =========================================
-def run_langgraph(user_query: str):
-    initial_state = {
-        "user_query": user_query,
-        "planner_output": {},
-        "executor_output": {},
-        "final_output": {},
-        "use_tool": False
+def run(query: str):
+    state = {
+        "user_query": query,
+        "planner": {},
+        "executor": {},
+        "final": {}
     }
 
-    result = app.invoke(initial_state)
-
-    return result["final_output"]
+    result = app.invoke(state)
+    return result["final"]
 
 
 # =========================================
-# Main Execution Entry Point
+# Main
 # =========================================
 if __name__ == "__main__":
-    user_query = input("Enter your query: ")
-
-    result = run_langgraph(user_query)
-
+    q = input("Enter query: ")
+    result = run(q)
     print("\n✅ Final Output:")
     print(json.dumps(result, indent=2))
