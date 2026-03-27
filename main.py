@@ -1,5 +1,5 @@
 # =========================================
-# Multi-Agent System with LangGraph Orchestration
+# Multi-Agent System with Conditional Routing (LangGraph)
 # =========================================
 # Agents:
 # 1. Planner Agent
@@ -206,13 +206,14 @@ def responder_agent(planner_output: dict, executor_output: dict) -> dict:
 
 
 # =========================================
-# LangGraph State Definition
+# LangGraph State Definition (Updated)
 # =========================================
 class AgentState(TypedDict):
     user_query: str
     planner_output: dict
     executor_output: dict
     final_output: dict
+    use_tool: bool
 
 
 # =========================================
@@ -224,10 +225,14 @@ def planner_node(state: AgentState) -> AgentState:
 
 
 # =========================================
-# Executor Node
+# Executor Node (Sets use_tool flag)
 # =========================================
 def executor_node(state: AgentState) -> AgentState:
-    state["executor_output"] = executor_agent(state["planner_output"])
+    executor_output = executor_agent(state["planner_output"])
+
+    state["executor_output"] = executor_output
+    state["use_tool"] = executor_output.get("use_tool", False)
+
     return state
 
 
@@ -236,14 +241,32 @@ def executor_node(state: AgentState) -> AgentState:
 # =========================================
 def responder_node(state: AgentState) -> AgentState:
     state["final_output"] = responder_agent(
-        state["planner_output"],
-        state["executor_output"]
+        state.get("planner_output", {}),
+        state.get("executor_output", {})
     )
     return state
 
 
 # =========================================
-# Build LangGraph Workflow
+# Routing Logic (Conditional Decision)
+# =========================================
+def route_decision(state: AgentState) -> str:
+    """
+    Decide next node based on tool usage
+    """
+    # ⚠️ Note: Executor hasn't run yet, so we simulate decision
+    # For now, we trigger executor always for safety if unclear
+
+    query = state["user_query"].lower()
+
+    if "weather" in query:
+        return "executor"
+    else:
+        return "responder"
+
+
+# =========================================
+# Build LangGraph with Conditional Routing
 # =========================================
 graph = StateGraph(AgentState)
 
@@ -253,21 +276,32 @@ graph.add_node("responder", responder_node)
 
 graph.set_entry_point("planner")
 
-graph.add_edge("planner", "executor")
+# 🔥 Conditional Routing
+graph.add_conditional_edges(
+    "planner",
+    route_decision,
+    {
+        "executor": "executor",
+        "responder": "responder"
+    }
+)
+
+# After executor → responder
 graph.add_edge("executor", "responder")
 
 app = graph.compile()
 
 
 # =========================================
-# Run LangGraph
+# Run LangGraph Workflow
 # =========================================
 def run_langgraph(user_query: str):
     initial_state = {
         "user_query": user_query,
         "planner_output": {},
         "executor_output": {},
-        "final_output": {}
+        "final_output": {},
+        "use_tool": False
     }
 
     result = app.invoke(initial_state)
