@@ -1,7 +1,12 @@
 # =========================================
-# Multi-Agent MCP System (Multi-Tool)
+# FastAPI + Multi-Agent MCP System
 # =========================================
 
+# =========================================
+# Imports
+# =========================================
+from fastapi import FastAPI
+from pydantic import BaseModel
 from openai import OpenAI
 import json
 import os
@@ -28,27 +33,34 @@ client = OpenAI(api_key=api_key)
 
 
 # =========================================
-# TOOLS (MCP Style)
+# FastAPI App Initialization
 # =========================================
+app = FastAPI(title="Multi-Agent MCP API")
 
+
+# =========================================
+# Request Schema
+# =========================================
+class QueryRequest(BaseModel):
+    query: str
+
+
+# =========================================
+# TOOLS
+# =========================================
 def get_weather(latitude: float, longitude: float):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current_weather=true"
     return requests.get(url).json()
 
 
 def get_ip_info():
-    url = "http://ip-api.com/json/"
-    return requests.get(url).json()
+    return requests.get("http://ip-api.com/json/").json()
 
 
 def search_duckduckgo(query: str):
-    url = f"https://api.duckduckgo.com/?q={query}&format=json"
-    return requests.get(url).json()
+    return requests.get(f"https://api.duckduckgo.com/?q={query}&format=json").json()
 
 
-# =========================================
-# TOOL REGISTRY (IMPORTANT)
-# =========================================
 TOOLS = {
     "get_weather": get_weather,
     "get_ip_info": get_ip_info,
@@ -57,13 +69,10 @@ TOOLS = {
 
 
 # =========================================
-# Planner Agent
+# AGENTS
 # =========================================
 def planner_agent(user_query: str):
-
     PROMPT = """
-    You are a Planner Agent.
-
     Return JSON:
     {
       "intent": "string",
@@ -71,7 +80,7 @@ def planner_agent(user_query: str):
     }
     """
 
-    response = client.chat.completions.create(
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": PROMPT},
@@ -80,28 +89,15 @@ def planner_agent(user_query: str):
         response_format={"type": "json_object"}
     )
 
-    output = response.choices[0].message.content
-    print("\n🧠 Planner:", output)
-
-    return json.loads(output)
+    return json.loads(res.choices[0].message.content)
 
 
-# =========================================
-# Executor Agent (Tool Selector)
-# =========================================
-def executor_agent(planner_output: dict, user_query: str):
-
+def executor_agent(planner_output, user_query):
     PROMPT = f"""
-    You are a Tool Selection Agent.
-
     Available Tools:
-    1. get_weather(latitude, longitude)
-    2. get_ip_info()
-    3. search(query)
-
-    Decide:
-    - which tool to use
-    - parameters
+    get_weather(latitude, longitude)
+    get_ip_info()
+    search(query)
 
     Return JSON:
     {{
@@ -114,63 +110,45 @@ def executor_agent(planner_output: dict, user_query: str):
     Plan: {planner_output}
     """
 
-    response = client.chat.completions.create(
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "system", "content": PROMPT}],
         response_format={"type": "json_object"}
     )
 
-    output = response.choices[0].message.content
-    print("\n⚙️ Executor:", output)
+    result = json.loads(res.choices[0].message.content)
 
-    result = json.loads(output)
-
-    # Execute tool dynamically
     if result.get("use_tool"):
         tool_name = result.get("tool_name")
         params = result.get("tool_params", {})
 
         if tool_name in TOOLS:
             try:
-                tool_result = TOOLS[tool_name](**params)
-                result["tool_result"] = tool_result
+                result["tool_result"] = TOOLS[tool_name](**params)
             except Exception as e:
                 result["tool_result"] = {"error": str(e)}
 
     return result
 
 
-# =========================================
-# Responder Agent
-# =========================================
 def responder_agent(planner, executor):
-
     PROMPT = f"""
-    You are a Responder Agent.
+    Planner: {planner}
+    Executor: {executor}
 
-    Planner:
-    {planner}
-
-    Executor:
-    {executor}
-
-    Give final answer.
     Return JSON:
     {{
       "final_answer": "string"
     }}
     """
 
-    response = client.chat.completions.create(
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "system", "content": PROMPT}],
         response_format={"type": "json_object"}
     )
 
-    output = response.choices[0].message.content
-    print("\n💬 Responder:", output)
-
-    return json.loads(output)
+    return json.loads(res.choices[0].message.content)
 
 
 # =========================================
@@ -211,33 +189,32 @@ graph.add_node("executor", executor_node)
 graph.add_node("responder", responder_node)
 
 graph.set_entry_point("planner")
-
 graph.add_edge("planner", "executor")
 graph.add_edge("executor", "responder")
 
-app = graph.compile()
+workflow = graph.compile()
 
 
 # =========================================
-# Run
+# API Endpoint
 # =========================================
-def run(query: str):
+@app.post("/query")
+def query_agent(request: QueryRequest):
     state = {
-        "user_query": query,
+        "user_query": request.query,
         "planner": {},
         "executor": {},
         "final": {}
     }
 
-    result = app.invoke(state)
+    result = workflow.invoke(state)
+
     return result["final"]
 
 
 # =========================================
-# Main
+# Health Check
 # =========================================
-if __name__ == "__main__":
-    q = input("Enter query: ")
-    result = run(q)
-    print("\n✅ Final Output:")
-    print(json.dumps(result, indent=2))
+@app.get("/")
+def health():
+    return {"status": "running"}
