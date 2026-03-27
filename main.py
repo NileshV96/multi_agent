@@ -1,5 +1,5 @@
 # =========================================
-# Multi-Agent System with MCP Tool Integration
+# Multi-Agent System with LangGraph Orchestration
 # =========================================
 # Agents:
 # 1. Planner Agent
@@ -16,6 +16,8 @@ import json
 import os
 import requests
 from dotenv import load_dotenv
+from typing import TypedDict
+from langgraph.graph import StateGraph
 
 
 # =========================================
@@ -106,7 +108,7 @@ def planner_agent(user_query: str) -> dict:
 def executor_agent(planner_output: dict) -> dict:
     """
     Executor Agent:
-    - Decides whether to use tool
+    - Decides tool usage
     - Executes tool if needed
     """
 
@@ -153,7 +155,6 @@ def executor_agent(planner_output: dict) -> dict:
     # ====================================
     if result.get("use_tool") and result.get("tool_name") == "get_weather":
         params = result.get("tool_params", {})
-
         tool_result = get_weather(**params)
         result["tool_result"] = tool_result
 
@@ -166,7 +167,7 @@ def executor_agent(planner_output: dict) -> dict:
 def responder_agent(planner_output: dict, executor_output: dict) -> dict:
     """
     Responder Agent:
-    - Generates final human-readable answer
+    - Generates final answer
     """
 
     RESPONDER_PROMPT = f"""
@@ -205,21 +206,73 @@ def responder_agent(planner_output: dict, executor_output: dict) -> dict:
 
 
 # =========================================
-# Orchestration Function
+# LangGraph State Definition
 # =========================================
-def run_multi_agent(user_query: str) -> dict:
-    """
-    Orchestrates the flow between agents:
-    Planner → Executor → Responder
-    """
+class AgentState(TypedDict):
+    user_query: str
+    planner_output: dict
+    executor_output: dict
+    final_output: dict
 
-    planner_output = planner_agent(user_query)
 
-    executor_output = executor_agent(planner_output)
+# =========================================
+# Planner Node
+# =========================================
+def planner_node(state: AgentState) -> AgentState:
+    state["planner_output"] = planner_agent(state["user_query"])
+    return state
 
-    final_output = responder_agent(planner_output, executor_output)
 
-    return final_output
+# =========================================
+# Executor Node
+# =========================================
+def executor_node(state: AgentState) -> AgentState:
+    state["executor_output"] = executor_agent(state["planner_output"])
+    return state
+
+
+# =========================================
+# Responder Node
+# =========================================
+def responder_node(state: AgentState) -> AgentState:
+    state["final_output"] = responder_agent(
+        state["planner_output"],
+        state["executor_output"]
+    )
+    return state
+
+
+# =========================================
+# Build LangGraph Workflow
+# =========================================
+graph = StateGraph(AgentState)
+
+graph.add_node("planner", planner_node)
+graph.add_node("executor", executor_node)
+graph.add_node("responder", responder_node)
+
+graph.set_entry_point("planner")
+
+graph.add_edge("planner", "executor")
+graph.add_edge("executor", "responder")
+
+app = graph.compile()
+
+
+# =========================================
+# Run LangGraph
+# =========================================
+def run_langgraph(user_query: str):
+    initial_state = {
+        "user_query": user_query,
+        "planner_output": {},
+        "executor_output": {},
+        "final_output": {}
+    }
+
+    result = app.invoke(initial_state)
+
+    return result["final_output"]
 
 
 # =========================================
@@ -228,7 +281,7 @@ def run_multi_agent(user_query: str) -> dict:
 if __name__ == "__main__":
     user_query = input("Enter your query: ")
 
-    result = run_multi_agent(user_query)
+    result = run_langgraph(user_query)
 
     print("\n✅ Final Output:")
     print(json.dumps(result, indent=2))
