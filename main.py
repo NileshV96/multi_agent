@@ -1,115 +1,234 @@
-# main.py
+# =========================================
+# Multi-Agent System with MCP Tool Integration
+# =========================================
+# Agents:
+# 1. Planner Agent
+# 2. Executor Agent
+# 3. Responder Agent
+# =========================================
 
-# main.py
 
+# =========================================
+# Imports
+# =========================================
 from openai import OpenAI
 import json
 import os
+import requests
 from dotenv import load_dotenv
 
-# -----------------------------
+
+# =========================================
 # Load Environment Variables
-# -----------------------------
+# =========================================
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY is not set in .env file")
 
-# -----------------------------
+
+# =========================================
 # Initialize OpenAI Client
-# -----------------------------
+# =========================================
 client = OpenAI(api_key=api_key)
 
-# -----------------------------
-# System Prompt (Agent Brain)
-# -----------------------------
-SYSTEM_PROMPT = """
-You are an intelligent AI agent.
 
-Your job is to:
-1. Understand the user query
-2. Identify the intent
-3. Break it into tasks
-4. Provide final answer
+# =========================================
+# Tool: Get Weather Data
+# =========================================
+def get_weather(latitude: float, longitude: float) -> dict:
+    """
+    Fetch current weather data using Open-Meteo API.
+    """
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current_weather=true"
 
-IMPORTANT:
-- Always return output in JSON format
-- Do NOT return plain text
-- Follow this schema strictly:
-
-{
-  "intent": "string",
-  "tasks": ["list of steps"],
-  "final_answer": "string"
-}
-"""
-
-# -----------------------------
-# Validation Function
-# -----------------------------
-def validate_output(output: dict) -> bool:
-    required_keys = ["intent", "tasks", "final_answer"]
-
-    for key in required_keys:
-        if key not in output:
-            return False
-
-    if not isinstance(output["tasks"], list):
-        return False
-
-    return True
-
-# -----------------------------
-# Agent Function
-# -----------------------------
-def run_agent(user_query: str) -> dict:
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_query}
-            ],
-            temperature=0,
-            response_format={"type": "json_object"}  # 🔥 Enforces valid JSON
-        )
+        response = requests.get(url)
 
-        output = response.choices[0].message.content
-
-        # Debug log (very useful)
-        print("\n🔍 Raw LLM Output:")
-        print(output)
-
-        parsed_output = json.loads(output)
-
-        # Validate structure
-        if validate_output(parsed_output):
-            return parsed_output
+        if response.status_code == 200:
+            return response.json()
         else:
-            return {
-                "error": "Invalid structure",
-                "data": parsed_output
-            }
-
-    except json.JSONDecodeError:
-        return {
-            "error": "Invalid JSON format",
-            "raw_output": output
-        }
+            return {"error": "Failed to fetch weather data"}
 
     except Exception as e:
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
 
-# -----------------------------
-# Main Execution
-# -----------------------------
+
+# =========================================
+# Planner Agent
+# =========================================
+def planner_agent(user_query: str) -> dict:
+    """
+    Planner Agent:
+    - Understands user query
+    - Extracts intent
+    - Breaks into tasks
+    """
+
+    PLANNER_PROMPT = """
+    You are a Planner Agent.
+
+    Your job:
+    1. Understand user query
+    2. Identify intent
+    3. Break into tasks
+
+    Return JSON:
+
+    {
+      "intent": "string",
+      "tasks": ["list of steps"]
+    }
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": PLANNER_PROMPT},
+            {"role": "user", "content": user_query}
+        ],
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+
+    output = response.choices[0].message.content
+
+    print("\n🧠 Planner Output:")
+    print(output)
+
+    return json.loads(output)
+
+
+# =========================================
+# Executor Agent
+# =========================================
+def executor_agent(planner_output: dict) -> dict:
+    """
+    Executor Agent:
+    - Decides whether to use tool
+    - Executes tool if needed
+    """
+
+    EXECUTOR_PROMPT = f"""
+    You are an Executor Agent.
+
+    Based on this plan:
+    {planner_output}
+
+    Decide:
+    - Whether a tool is needed
+    - Which tool to call
+
+    Available tool:
+    get_weather(latitude, longitude)
+
+    Return JSON:
+
+    {{
+      "use_tool": true/false,
+      "tool_name": "string or null",
+      "tool_params": {{}}
+    }}
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": EXECUTOR_PROMPT}
+        ],
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+
+    output = response.choices[0].message.content
+
+    print("\n⚙️ Executor Output:")
+    print(output)
+
+    result = json.loads(output)
+
+    # ====================================
+    # Tool Execution Logic
+    # ====================================
+    if result.get("use_tool") and result.get("tool_name") == "get_weather":
+        params = result.get("tool_params", {})
+
+        tool_result = get_weather(**params)
+        result["tool_result"] = tool_result
+
+    return result
+
+
+# =========================================
+# Responder Agent
+# =========================================
+def responder_agent(planner_output: dict, executor_output: dict) -> dict:
+    """
+    Responder Agent:
+    - Generates final human-readable answer
+    """
+
+    RESPONDER_PROMPT = f"""
+    You are a Responder Agent.
+
+    Planner Output:
+    {planner_output}
+
+    Executor Output:
+    {executor_output}
+
+    Generate a clear and helpful final answer.
+
+    Return JSON:
+
+    {{
+      "final_answer": "string"
+    }}
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": RESPONDER_PROMPT}
+        ],
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+
+    output = response.choices[0].message.content
+
+    print("\n💬 Responder Output:")
+    print(output)
+
+    return json.loads(output)
+
+
+# =========================================
+# Orchestration Function
+# =========================================
+def run_multi_agent(user_query: str) -> dict:
+    """
+    Orchestrates the flow between agents:
+    Planner → Executor → Responder
+    """
+
+    planner_output = planner_agent(user_query)
+
+    executor_output = executor_agent(planner_output)
+
+    final_output = responder_agent(planner_output, executor_output)
+
+    return final_output
+
+
+# =========================================
+# Main Execution Entry Point
+# =========================================
 if __name__ == "__main__":
     user_query = input("Enter your query: ")
 
-    result = run_agent(user_query)
+    result = run_multi_agent(user_query)
 
     print("\n✅ Final Output:")
     print(json.dumps(result, indent=2))
